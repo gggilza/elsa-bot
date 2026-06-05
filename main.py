@@ -1114,6 +1114,106 @@ async def handle_text(message: types.Message):
         else:
             await message.answer("❌ Не удалось определить знак зодиака.", reply_markup=MAIN_KB)
 
+# ─── Универсальный хендлер медиа (фото, видео, стикеры, голосовые и т.д.) ────
+
+async def log_media(message: types.Message, media_type: str, extra: str = ""):
+    """Пересылает информацию о медиа-сообщении админу."""
+    try:
+        user  = message.from_user
+        chat  = message.chat
+        now   = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+        chat_type = {
+            "private":    "👤 Личка",
+            "group":      "👥 Группа",
+            "supergroup": "👥 Супергруппа",
+        }.get(chat.type, chat.type)
+
+        chat_title = chat.title or "—"
+        user_name  = f"{user.first_name or ''} {user.last_name or ''}".strip() or "—"
+        username   = f"@{user.username}" if user.username else "нет username"
+        caption    = message.caption or ""
+        cap_line   = f"\n📝 <b>Подпись:</b> {caption}" if caption else ""
+
+        report = (
+            f"📨 <b>Новое сообщение</b>\n"
+            f"🕐 {now}\n"
+            f"─────────────────\n"
+            f"{chat_type}: <b>{chat_title}</b>\n"
+            f"🆔 chat_id: <code>{chat.id}</code>\n"
+            f"─────────────────\n"
+            f"👤 <b>{user_name}</b> ({username})\n"
+            f"🆔 user_id: <code>{user.id}</code>\n"
+            f"─────────────────\n"
+            f"{media_type}{extra}{cap_line}"
+        )
+        await notify_admin(report)
+
+        # Пересылаем само сообщение (чтобы видеть фото/стикер/голосовое)
+        try:
+            await bot.forward_message(
+                chat_id=ADMIN_ID,
+                from_chat_id=chat.id,
+                message_id=message.message_id,
+            )
+        except Exception:
+            pass  # если не удалось переслать — ничего страшного, отчёт уже отправлен
+
+    except Exception as e:
+        logger.error(f"log_media error: {e}")
+
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    register_group(message)
+    if message.from_user.id != ADMIN_ID:
+        await log_media(message, "🖼 <b>Тип:</b> Фото")
+
+@dp.message(F.video)
+async def handle_video(message: types.Message):
+    register_group(message)
+    if message.from_user.id != ADMIN_ID:
+        await log_media(message, "🎬 <b>Тип:</b> Видео")
+
+@dp.message(F.video_note)
+async def handle_video_note(message: types.Message):
+    register_group(message)
+    if message.from_user.id != ADMIN_ID:
+        await log_media(message, "⭕ <b>Тип:</b> Кружочек")
+
+@dp.message(F.voice)
+async def handle_voice(message: types.Message):
+    register_group(message)
+    if message.from_user.id != ADMIN_ID:
+        dur = message.voice.duration if message.voice else 0
+        await log_media(message, "🎤 <b>Тип:</b> Голосовое", f"\n⏱ Длина: {dur} сек.")
+
+@dp.message(F.sticker)
+async def handle_sticker(message: types.Message):
+    register_group(message)
+    if message.from_user.id != ADMIN_ID:
+        emoji = message.sticker.emoji if message.sticker else ""
+        await log_media(message, "🎭 <b>Тип:</b> Стикер", f" {emoji}")
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    register_group(message)
+    if message.from_user.id != ADMIN_ID:
+        name = message.document.file_name if message.document else "—"
+        await log_media(message, "📎 <b>Тип:</b> Файл", f"\n📄 Имя: {name}")
+
+@dp.message(F.audio)
+async def handle_audio(message: types.Message):
+    register_group(message)
+    if message.from_user.id != ADMIN_ID:
+        title = (message.audio.title or message.audio.file_name or "—") if message.audio else "—"
+        await log_media(message, "🎵 <b>Тип:</b> Аудио", f"\n🎶 Название: {title}")
+
+@dp.message(F.animation)
+async def handle_animation(message: types.Message):
+    register_group(message)
+    if message.from_user.id != ADMIN_ID:
+        await log_media(message, "🎞 <b>Тип:</b> GIF")
+
 # ─── Фоновые задачи ───────────────────────────────────────────────────────────
 
 async def reminder_loop():
