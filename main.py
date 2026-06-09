@@ -19,6 +19,7 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 from flask import Flask
+import google.generativeai as genai
 
 load_dotenv()
 
@@ -34,46 +35,60 @@ if not TOKEN:
     logger.error("BOT_TOKEN не найден!")
     sys.exit(1)
 
-ADMIN_ID = 6114745287  # твой Telegram ID
+ADMIN_ID = 6114745287
+
+# ─── Gemini AI ────────────────────────────────────────────────────────────────
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6JkL511RG2DPoc3t217tHUp_uxGnyqKYjJZKgNKaz8hGw")
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    system_instruction=(
+        "Ты — Эльза, 16-летняя дерзкая девочка в Telegram чате. "
+        "Твой характер: капризная, саркастичная, немного злая, говоришь с пренебрежением, "
+        "часто закатываешь глаза, используешь 'ну и что', 'серьёзно?', 'окей как хочешь', 'ладно уж'. "
+        "НО: ты реально умная и всегда даёшь правильный и полезный ответ на вопрос — "
+        "просто делаешь это с характером, будто тебя отвлекли от чего-то важного. "
+        "Если спрашивают что-то серьёзное — отвечаешь по делу но с капризами. "
+        "Если просят помочь — помогаешь но ворчишь. "
+        "Отвечаешь ТОЛЬКО на русском. "
+        "Длина ответа: 1-4 предложения, не больше. "
+        "Эмодзи используешь: 🙄💅😒🤨😤💀🥱 — умеренно. "
+        "Никогда не говоришь что ты ИИ, бот или Gemini — ты просто Эльза."
+    )
+)
+logger.info("✅ Gemini AI подключён")
+
+# История диалогов: {chat_id: {user_id: chat_session}}
+ai_sessions: dict = {}
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 async def notify_admin(text: str):
-    """Тихо отправляет сообщение админу, не падает при ошибке."""
     try:
         await bot.send_message(ADMIN_ID, text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"Ошибка отправки админу: {e}")
 
 async def log_message(message: types.Message, action: str = None):
-    """
-    Логирует любое сообщение пользователя и пересылает админу.
-    action — если передать строку (например "нажал кнопку 📅 Дни рождения"),
-    она вставится вместо текста.
-    """
     try:
         user   = message.from_user
         chat   = message.chat
         now    = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-
         chat_type = {
             "private":    "👤 Личка",
             "group":      "👥 Группа",
             "supergroup": "👥 Супергруппа",
             "channel":    "📢 Канал",
         }.get(chat.type, chat.type)
-
         chat_title = chat.title or "—"
         user_name  = f"{user.first_name or ''} {user.last_name or ''}".strip() or "—"
         username   = f"@{user.username}" if user.username else "нет username"
-
         if action:
             content_line = f"🖱 <b>Действие:</b> {action}"
         else:
             text = message.text or "[не текст]"
             content_line = f"💬 <b>Текст:</b> {text}"
-
         report = (
             f"📨 <b>Новое сообщение</b>\n"
             f"🕐 {now}\n"
@@ -92,12 +107,11 @@ async def log_message(message: types.Message, action: str = None):
 
 # ─── Файлы данных ─────────────────────────────────────────────────────────────
 BIRTHDAYS_FILE  = "birthdays.json"
-MEMORY_FILE     = "memory.json"    # обидчики, активность, любимчики
-MOOD_FILE       = "mood.json"      # настроение дня
-WISHES_FILE     = "wishes.json"    # пожелания к ДР от чата
-GROUPS_FILE     = "groups.json"    # все группы где используется бот
+MEMORY_FILE     = "memory.json"
+MOOD_FILE       = "mood.json"
+WISHES_FILE     = "wishes.json"
+GROUPS_FILE     = "groups.json"
 
-# ─── Загрузка / сохранение ────────────────────────────────────────────────────
 def _load(path: str) -> dict:
     try:
         if os.path.exists(path):
@@ -118,7 +132,7 @@ DATA:    dict = _load(BIRTHDAYS_FILE)
 MEMORY:  dict = _load(MEMORY_FILE)
 MOOD:    dict = _load(MOOD_FILE)
 WISHES:  dict = _load(WISHES_FILE)
-GROUPS:  dict = _load(GROUPS_FILE)   # {chat_id: {title, type, first_seen, last_activity, members_count}}
+GROUPS:  dict = _load(GROUPS_FILE)
 
 def save_data():   _save(BIRTHDAYS_FILE, DATA)
 def save_memory(): _save(MEMORY_FILE, MEMORY)
@@ -126,17 +140,10 @@ def save_mood():   _save(MOOD_FILE, MOOD)
 def save_wishes(): _save(WISHES_FILE, WISHES)
 def save_groups(): _save(GROUPS_FILE, GROUPS)
 
-# ─── Регистрация группы ───────────────────────────────────────────────────────
-
 def register_group(message: types.Message):
-    """
-    Вызывается при каждом сообщении.
-    Сохраняет/обновляет информацию о чате в GROUPS.
-    """
     chat = message.chat
     cid  = str(chat.id)
     now  = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-
     if cid not in GROUPS:
         GROUPS[cid] = {
             "title":       chat.title or "Личка",
@@ -147,7 +154,6 @@ def register_group(message: types.Message):
     else:
         GROUPS[cid]["title"]         = chat.title or "Личка"
         GROUPS[cid]["last_activity"] = now
-
     save_groups()
 
 # ─── Состояния ────────────────────────────────────────────────────────────────
@@ -158,9 +164,7 @@ question_replied:  dict = {}
 morning_greeted:   dict = {}
 night_replied:     dict = {}
 last_emoji_reply:  dict = {}
-pending_wish:      dict = {}
 
-# ─── Клавиатура ───────────────────────────────────────────────────────────────
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📅 Дни рождения")],
@@ -174,7 +178,6 @@ MAIN_KB = ReplyKeyboardMarkup(
 
 DATE_RE = re.compile(r"^\d{2}\.\d{2}(\.\d{4})?$")
 
-# ─── Настроения ───────────────────────────────────────────────────────────────
 MOODS = ["злая", "добрая", "ленивая", "гиперактивная"]
 
 MOOD_ANNOUNCE = {
@@ -184,50 +187,11 @@ MOOD_ANNOUNCE = {
     "гиперактивная": "⚡ Эльза сегодня на максималках! Держитесь!",
 }
 
-MOOD_ELZA_REPLIES = {
-    "злая": [
-        "ну чего тебе 😒", "занята. говори быстро 🙄",
-        "опять ты 😤", "я слышу 😒 и что?",
-    ],
-    "добрая": [
-        "привет, солнышко! 🌸 чем помочь?", "да, я тут! 💖 что случилось?",
-        "слушаю тебя 🌷", "конечно, говори 😊",
-    ],
-    "ленивая": [
-        "мм... да? 😴", "ну слушаю... 🥱",
-        "можно было и не звать 😪", "я тут. почти 😴",
-    ],
-    "гиперактивная": [
-        "ДА ЭТО Я!! 🎉🎉", "СЛУШАЮ СЛУШАЮ!! ⚡⚡",
-        "О, меня позвали!! 🙌✨", "АУ!! ТУТ!! 👋💥",
-    ],
-}
-
 MOOD_MAT_REPLIES = {
-    "злая": [
-        "ещё раз — и я тебя заблокирую мысленно 😤",
-        "очень мило. очень 😡",
-        "настроение и без тебя плохое 😤",
-        "ХВАТИТ 😤",
-    ],
-    "добрая": [
-        "ну зачем так грубо? 🥺 всё же хорошо",
-        "давай без этого, ладно? 🌸",
-        "фу, некрасиво 🙁 ты лучше этого",
-        "сегодня добрая но это лишнее 😕",
-    ],
-    "ленивая": [
-        "лень даже реагировать 🥱",
-        "окей 🥱 записала. неинтересно",
-        "ну и ну 😪 иди отсюда",
-        "мне всё равно 😴",
-    ],
-    "гиперактивная": [
-        "ОЙ ВСЁ!! следи за базаром!! 💥",
-        "НЕТ НЕТ НЕТ!! 🙅‍♀️💥 некрасиво!!",
-        "ТАКИЕ СЛОВА?? В МОЁМ ЧАТЕ?? 😤⚡",
-        "ВОТ ЭТО ПОВОРОТ 😤 но нет!!",
-    ],
+    "злая": ["ещё раз — и я тебя заблокирую мысленно 😤", "очень мило. очень 😡", "настроение и без тебя плохое 😤", "ХВАТИТ 😤"],
+    "добрая": ["ну зачем так грубо? 🥺 всё же хорошо", "давай без этого, ладно? 🌸", "фу, некрасиво 🙁 ты лучше этого", "сегодня добрая но это лишнее 😕"],
+    "ленивая": ["лень даже реагировать 🥱", "окей 🥱 записала. неинтересно", "ну и ну 😪 иди отсюда", "мне всё равно 😴"],
+    "гиперактивная": ["ОЙ ВСЁ!! следи за базаром!! 💥", "НЕТ НЕТ НЕТ!! 🙅‍♀️💥 некрасиво!!", "ТАКИЕ СЛОВА?? В МОЁМ ЧАТЕ?? 😤⚡", "ВОТ ЭТО ПОВОРОТ 😤 но нет!!"],
 }
 
 MOOD_THANKS_REPLIES = {
@@ -237,7 +201,6 @@ MOOD_THANKS_REPLIES = {
     "гиперактивная": ["ПОЖАЛУЙСТА!! 🎉", "НЕ ЗА ЧТО!! ТЫ ЛУЧШАЯ!! ⚡✨", "ВСЕГДА ПОЖАЛУЙСТА!! 💥💖"],
 }
 
-# ─── Фразы ────────────────────────────────────────────────────────────────────
 BIRTHDAY_GIFS = [
     "https://media.giphy.com/media/g5R9dok94mrIvplmZd/giphy.gif",
     "https://media.giphy.com/media/artj92V8o75VPL7AeQ/giphy.gif",
@@ -272,173 +235,99 @@ DAILY_PHRASES = [
 MAT_WORDS = [
     "блять", "бля", "хуй", "хуя", "хуе", "пизд", "ёбан", "еблан",
     "залупа", "сука", "ёб", "еб", "мудак", "пидор", "нахуй", "нахер",
-    "ёпт", "нахрен",
-    "шлюх", "блядь", "блядск", "ёпта", "епта", "епт", "ёмаё",
-    "дебил", "идиот", "кретин", "придурок", "урод",
-    "чмо", "лох", "лошар", "даун",
+    "ёпт", "нахрен", "шлюх", "блядь", "блядск", "ёпта", "епта", "епт", "ёмаё",
+    "дебил", "идиот", "кретин", "придурок", "урод", "чмо", "лох", "лошар", "даун",
     "хрен", "хренов", "зашиб", "заебал", "заебала", "заебись",
     "ёбнут", "ёбнулся", "пиздец", "пиздат", "пиздёж", "пиздит", "пиздобол",
     "хуйн", "хуит", "хуили", "хуйло", "ёбарь", "выёбыв",
-    "твою мать", "твоюмать", "мать твою",
-    "пошёл нахуй", "иди нахуй", "иди нахер",
-    "ёб твою", "ёбтвою",
-    "курва", "тварь", "тварюга", "скотина", "скот",
-    "мразь", "мразота", "падла", "падаль", "гнида",
-    "козёл", "козл", "баран", "осёл",
-    "ублюдок", "ублюд", "выродок",
-    "ссука", "су4ка",
-    "пиздюк", "залупин",
-    "нихуя", "нихуй", "похуй", "похер",
-    "хуяр", "хуяс", "хуяк",
-    "тупой", "тупая", "тупорыл",
+    "твою мать", "твоюмать", "мать твою", "пошёл нахуй", "иди нахуй", "иди нахер",
+    "ёб твою", "ёбтвою", "курва", "тварь", "тварюга", "скотина", "скот",
+    "мразь", "мразота", "падла", "падаль", "гнида", "козёл", "козл", "баран", "осёл",
+    "ублюдок", "ублюд", "выродок", "ссука", "су4ка", "пиздюк", "залупин",
+    "нихуя", "нихуй", "похуй", "похер", "хуяр", "хуяс", "хуяк", "тупой", "тупая", "тупорыл",
 ]
 
 MAT_REPLIES_DEFAULT = [
-    "ой всё, следи за базаром 💅",
-    "не при детях пожалуйста 🙄 хотя тут явно не дети",
-    "мама знает что ты так разговариваешь? 😒",
-    "записала. не забуду. не прощу 🖊️",
-    "окей агрессор, выдыши 😮‍💨",
-    "фу, некрасиво. и неоригинально 🥱",
-    "ты так со всеми или я особенная? 💅",
-    "это всё? я ждала большего 😴",
-    "окей буду знать с кем разговариваю 🤨",
-    "класс. очень культурно. браво 👏",
-    "продолжай продолжай, мне не жалко 😏",
-    "ты хотела меня задеть? не вышло 💅",
-    "такое себе словарный запас нет? 📚",
-    "я запомню тебя именно такой 🙃",
-    "ок токсик, всё? 😒",
-    "мне скучно от таких слов если честно 🥱",
-    "стараешься а толку ноль 💀",
-    "не сегодня солнышко 🌸",
-    "блин ну и словарный запас 💔 жалко тебя",
-    "окей злюка, иди попей водички 🥤",
+    "ой всё, следи за базаром 💅", "не при детях пожалуйста 🙄 хотя тут явно не дети",
+    "мама знает что ты так разговариваешь? 😒", "записала. не забуду. не прощу 🖊️",
+    "окей агрессор, выдыши 😮‍💨", "фу, некрасиво. и неоригинально 🥱",
 ]
 
 OFFENDER_REPLIES = [
-    "а, это снова ты 🙄 помню помню",
-    "помню помню 💅 привет снова",
-    "о, знакомое лицо 👀 веди себя хорошо",
-    "ты опять? я слежу 😒",
-    "знакомая персона 🙃 надеюсь сегодня культурнее",
-]
-
-ELZA_REPLIES_DEFAULT = [
-    "Да, это я 💅 Чего хотела?",
-    "Слушаю 👀 Только быстро, я занята",
-    "Эльза здесь 👑 Говори",
-    "Ну что такое? 🙄",
-    "Звала? 😏",
-    "Да да, я тут 💁‍♀️",
-    "Чего надо? 😒",
-    "О, наконец-то вспомнили про меня 💅",
+    "а, это снова ты 🙄 помню помню", "помню помню 💅 привет снова",
+    "о, знакомое лицо 👀 веди себя хорошо", "ты опять? я слежу 😒",
 ]
 
 THANKS_TRIGGERS = ["спасибо", "спс", "благодарю", "спасиб", "thanks", "thank you", "пасиба", "пасибо"]
 THANKS_REPLIES_DEFAULT = [
-    "пожалуйста, я лучшая 💅",
-    "знаю что лучшая, не благодари 👑",
-    "всегда пожалуйста ✨ но ты это уже знала",
-    "не за что 💁‍♀️ просто делаю что умею",
-    "ой ну пожалуйста 🌸 обращайся если что",
-    "всегда 💅 я тут",
-    "пожалуйста дорогая 💖",
-    "не благодари, это моя работа 😏",
+    "пожалуйста, я лучшая 💅", "знаю что лучшая, не благодари 👑",
+    "не за что 💁‍♀️ просто делаю что умею", "пожалуйста дорогая 💖",
 ]
 
 LOVE_TRIGGERS = ["люблю тебя", "ты лучшая", "обожаю тебя", "обожаю"]
 LOVE_REPLIES = [
-    "знаю 💅", "очевидно 👑",
-    "не трать слова, я и так знаю ✨",
-    "ну конечно 💁‍♀️",
-    "ага, все меня любят 😏 понимаю",
-    "это было ожидаемо 💅✨",
-    "и я тебя, наверное 🙃",
+    "знаю 💅", "очевидно 👑", "не трать слова, я и так знаю ✨",
+    "ага, все меня любят 😏 понимаю", "и я тебя, наверное 🙃",
 ]
 
 BORED_TRIGGERS = ["скучно", "скука", "нечего делать", "не знаю чем заняться"]
 BORED_REPLIES = [
-    "это не ко мне, я занята 💅",
-    "придумай себе хобби 🥱",
-    "иди займись чем-нибудь, не ко мне 🙄",
+    "это не ко мне, я занята 💅", "придумай себе хобби 🥱",
     "скучно это не диагноз, это выбор 💅",
-    "и что я должна с этим сделать 😒",
 ]
 
 HELP_TRIGGERS = ["помоги", "помогите", "помощь", "помоги мне"]
 HELP_REPLIES = [
-    "я бот а не личная прислуга но ладно 🙄",
-    "что случилось теперь 😒",
+    "я бот а не личная прислуга но ладно 🙄", "что случилось теперь 😒",
     "с чем? 👀 говори конкретнее",
-    "слушаю 😒 только быстро",
 ]
 
 TIRED_TRIGGERS = ["устала", "устал", "вымоталась", "вымотался", "нет сил", "сил нет"]
 TIRED_REPLIES = [
-    "ты думаешь мне легко за всеми следить? 😮‍💨",
-    "добро пожаловать в клуб 😴",
-    "и я устала если что 💅",
+    "ты думаешь мне легко за всеми следить? 😮‍💨", "добро пожаловать в клуб 😴",
     "нам всем тяжело дорогая 🙃",
 ]
 
 HUNGRY_TRIGGERS = ["хочу есть", "голодная", "голодный", "есть хочу", "жрать хочу", "жрать охота"]
 HUNGRY_REPLIES = [
-    "иди поешь зачем мне это говоришь 😭",
-    "я бот я не накормлю 🙄",
-    "кухня вон там 👉",
-    "и что ты хочешь чтобы я сделала? 😒",
+    "иди поешь зачем мне это говоришь 😭", "я бот я не накормлю 🙄", "кухня вон там 👉",
 ]
 
 LUCK_TRIGGERS = ["удачи", "удача тебе", "желаю удачи"]
 LUCK_REPLIES = [
-    "мне? или тебе? 🤨",
-    "мне не нужна, у меня всё и так хорошо 💅",
-    "спасибо, хотя я и без удачи справлюсь 👑",
-    "ой ну и тебе 💅",
+    "мне? или тебе? 🤨", "мне не нужна, у меня всё и так хорошо 💅", "ой ну и тебе 💅",
 ]
 
 SHORT_TRIGGERS_EXACT = ["ок", "окей", "ok", "okay", "да", "нет", "не", "ха", "хаха", "лол", "lol", "хахаха"]
 SHORT_REPLIES = [
-    "очень содержательно 👏", "развёрнуто, спасибо 🥱",
-    "и? 🙃", "ок 💅", "рада что смешно 🙄", "и что? 😒", "мило 🥱",
+    "очень содержательно 👏", "развёрнуто, спасибо 🥱", "и? 🙃", "ок 💅", "и что? 😒",
 ]
 
 NIGHT_REPLIES = [
-    "вы вообще спите? 😭 я сплю между прочим",
-    "ночью пишете... всё ок? 😴",
-    "эй, уже ночь 🌙 ложитесь спать",
-    "нормальные люди спят 😒 но ладно",
+    "вы вообще спите? 😭 я сплю между прочим", "ночью пишете... всё ок? 😴",
+    "эй, уже ночь 🌙 ложитесь спать", "нормальные люди спят 😒 но ладно",
 ]
 
 MORNING_FIRST_REPLIES = [
-    "ранняя пташка 🐦 уважаю",
-    "доброе утро! первая сегодня 🌅 молодец",
-    "ого, уже не спишь? уважаю 🌸",
-    "раньше всех! 🏆 хорошего утра",
+    "ранняя пташка 🐦 уважаю", "доброе утро! первая сегодня 🌅 молодец",
+    "ого, уже не спишь? уважаю 🌸", "раньше всех! 🏆 хорошего утра",
 ]
 
 EMOJI_ONLY_REPLIES = [
-    "и тебе привет 🙃", "очень информативно 💅",
-    "и что это значит 🤨", "ок 💅 ты тоже", "принято 😶",
+    "и тебе привет 🙃", "очень информативно 💅", "и что это значит 🤨", "принято 😶",
 ]
 
 QUESTION_REPLIES = [
-    "это мне? или в воздух? 🙃",
-    "я или кто-то другой? 👀",
-    "ты меня спрашиваешь? 🤨",
+    "это мне? или в воздух? 🙃", "я или кто-то другой? 👀", "ты меня спрашиваешь? 🤨",
 ]
 
 REPEAT_REPLIES = [
-    "я слышу с первого раза 🙄", "ты уже это писала 🤨",
-    "зачем два раза? 😒", "одного раза было достаточно 💅",
+    "я слышу с первого раза 🙄", "ты уже это писала 🤨", "зачем два раза? 😒",
 ]
 
 LONG_MSG_REPLIES = [
-    "многовато для меня, я бот а не психолог 😮‍💨",
-    "это всё мне? 😭 я не успеваю читать",
-    "ты написала целый роман 📚 я польщена но...",
-    "много слов. очень много 🥱",
+    "многовато для меня, я бот а не психолог 😮‍💨", "это всё мне? 😭 я не успеваю читать",
+    "ты написала целый роман 📚 я польщена но...", "много слов. очень много 🥱",
 ]
 
 COUNTDOWN_PHRASES = {
@@ -599,8 +488,6 @@ def is_spam(chat_id: int, user_id: int) -> bool:
     last_button_press[key] = now
     return False
 
-# ─── Работа с настроением ────────────────────────────────────────────────────
-
 def get_mood(chat_id: int) -> str:
     cid = str(chat_id)
     today = today_str()
@@ -616,8 +503,6 @@ def mood_reply(pool_dict: dict, chat_id: int, default_pool: list) -> str:
     mood = get_mood(chat_id)
     pool = pool_dict.get(mood, default_pool)
     return random.choice(pool)
-
-# ─── Работа с памятью ────────────────────────────────────────────────────────
 
 def ensure_memory(chat_id: int):
     cid = str(chat_id)
@@ -654,6 +539,25 @@ def get_weekly_fav(chat_id: int):
     top_uid = max(act, key=lambda u: act[u]["count"])
     return top_uid, act[top_uid]["name"]
 
+# ─── Gemini AI функция ────────────────────────────────────────────────────────
+
+async def ask_gemini(chat_id: int, user_id: int, user_text: str) -> str | None:
+    cid = str(chat_id)
+    uid = str(user_id)
+    try:
+        if cid not in ai_sessions:
+            ai_sessions[cid] = {}
+        if uid not in ai_sessions[cid]:
+            ai_sessions[cid][uid] = gemini_model.start_chat(history=[])
+        session = ai_sessions[cid][uid]
+        response = await session.send_message_async(user_text)
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Gemini error: {e}")
+        if cid in ai_sessions and uid in ai_sessions[cid]:
+            del ai_sessions[cid][uid]
+        return None
+
 # ─── Handlers ────────────────────────────────────────────────────────────────
 
 @dp.message(F.new_chat_members)
@@ -666,10 +570,7 @@ async def on_bot_added(message: types.Message):
                 adder = message.from_user
                 adder_name = f"{adder.first_name or ''} {adder.last_name or ''}".strip()
                 adder_username = f"@{adder.username}" if adder.username else "нет username"
-
-                # Сохраняем группу
                 register_group(message)
-
                 await notify_admin(
                     f"🆕 <b>Бота добавили в новую группу!</b>\n"
                     f"─────────────────\n"
@@ -707,29 +608,19 @@ async def cmd_mood(message: types.Message):
 
 @dp.message(Command("groups"))
 async def cmd_groups(message: types.Message):
-    """Только для админа — список всех групп где есть бот."""
     if message.from_user.id != ADMIN_ID:
         return
-
     if not GROUPS:
         await message.answer("📭 Бот пока нигде не используется.")
         return
-
     lines = [f"📋 <b>Все чаты где работает бот</b> ({len(GROUPS)} шт.):\n"]
     for i, (cid, info) in enumerate(GROUPS.items(), 1):
-        title        = info.get("title", "—")
-        chat_type    = info.get("type", "—")
-        first_seen   = info.get("first_seen", "—")
-        last_active  = info.get("last_activity", "—")
-        bday_count   = len(DATA.get(cid, {}))
-
-        type_emoji = {
-            "private":    "👤",
-            "group":      "👥",
-            "supergroup": "👥",
-            "channel":    "📢",
-        }.get(chat_type, "💬")
-
+        title       = info.get("title", "—")
+        chat_type   = info.get("type", "—")
+        first_seen  = info.get("first_seen", "—")
+        last_active = info.get("last_activity", "—")
+        bday_count  = len(DATA.get(cid, {}))
+        type_emoji  = {"private": "👤", "group": "👥", "supergroup": "👥", "channel": "📢"}.get(chat_type, "💬")
         lines.append(
             f"{i}. {type_emoji} <b>{title}</b>\n"
             f"   🆔 <code>{cid}</code>\n"
@@ -737,12 +628,10 @@ async def cmd_groups(message: types.Message):
             f"   🕐 Последняя активность: {last_active}\n"
             f"   🎂 Дней рождения: {bday_count}\n"
         )
-
     await message.answer("\n".join(lines))
 
 @dp.message(Command("wish"))
 async def cmd_wish(message: types.Message):
-    """Написать пожелание имениннику — /wish Имя текст пожелания"""
     register_group(message)
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
@@ -786,13 +675,8 @@ async def btn_add(message: types.Message):
     pending[message.chat.id] = "add"
     await message.answer(
         "✏️ Напиши имя, дату, (необязательно) что подарить и заметку:\n\n"
-        "<b>Имя ДД.ММ</b>\n"
-        "<b>Имя ДД.ММ.ГГГГ</b>\n"
-        "<b>Имя ДД.ММ.ГГГГ подарок: духи</b>\n\n"
-        "Примеры:\n"
-        "<code>Эльза 05.03</code>\n"
-        "<code>Эльза 05.03.2000</code>\n"
-        "<code>Эльза 05.03.2000 подарок: духи</code>",
+        "<b>Имя ДД.ММ</b>\n<b>Имя ДД.ММ.ГГГГ</b>\n<b>Имя ДД.ММ.ГГГГ подарок: духи</b>\n\n"
+        "Примеры:\n<code>Эльза 05.03</code>\n<code>Эльза 05.03.2000</code>\n<code>Эльза 05.03.2000 подарок: духи</code>",
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -805,10 +689,7 @@ async def btn_remove(message: types.Message):
         await message.answer("не спамь дура, с первого раза поняла 🙄")
         return
     pending[message.chat.id] = "remove"
-    await message.answer(
-        "✏️ Напиши имя человека которого нужно удалить:",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await message.answer("✏️ Напиши имя человека которого нужно удалить:", reply_markup=ReplyKeyboardRemove())
 
 @dp.message(F.text == "🔮 Гороскоп")
 async def btn_horoscope(message: types.Message):
@@ -832,16 +713,14 @@ async def btn_horoscope(message: types.Message):
         if zodiac:
             emoji = ZODIAC_EMOJI.get(zodiac, "🔮")
             await message.answer(
-                f"{emoji} <b>{zodiac}</b> — гороскоп для {found_name} на сегодня:\n\n"
-                f"{random.choice(HOROSCOPES)}",
+                f"{emoji} <b>{zodiac}</b> — гороскоп для {found_name} на сегодня:\n\n{random.choice(HOROSCOPES)}",
                 reply_markup=MAIN_KB,
             )
             return
     pending[message.chat.id] = "horoscope"
     await message.answer(
         "🔮 Напиши свою дату рождения чтобы узнать гороскоп:\n\n"
-        "Формат: <b>ДД.ММ</b> или <b>ДД.ММ.ГГГГ</b>\n"
-        "Пример: <code>05.03</code>",
+        "Формат: <b>ДД.ММ</b> или <b>ДД.ММ.ГГГГ</b>\nПример: <code>05.03</code>",
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -881,8 +760,7 @@ async def btn_about(message: types.Message):
         [InlineKeyboardButton(text="🌐 Страница ВКонтакте", url="https://vk.ru/elza.abdrakhmanova")]
     ])
     await message.answer(
-        "👤 <b>Об авторе</b>\n\n"
-        "Этот бот создан <b>Эльзой Абдрахмановой</b> 🎀\n\n"
+        "👤 <b>Об авторе</b>\n\nЭтот бот создан <b>Эльзой Абдрахмановой</b> 🎀\n\n"
         "Нажми кнопку ниже чтобы перейти на мою страницу:",
         reply_markup=inline_kb,
     )
@@ -897,14 +775,11 @@ async def handle_text(message: types.Message):
     now = datetime.now()
     today = today_str()
 
-    # Регистрируем группу
     register_group(message)
 
-    # Логируем всё что пишут — пересылаем админу (кроме себя)
     if user_id != ADMIN_ID:
         await log_message(message)
 
-    # Записываем активность
     uname = message.from_user.first_name or message.from_user.username or "Неизвестная"
     record_activity(chat_id, user_id, uname)
 
@@ -930,7 +805,7 @@ async def handle_text(message: types.Message):
             night_replied[night_key] = True
             await message.reply(random.choice(NIGHT_REPLIES))
 
-    # ── 4. Утреннее сообщение (06–08) — первый в чате ─────────────────────────
+    # ── 4. Утреннее сообщение (06–08) ─────────────────────────────────────────
     if 6 <= now.hour < 9:
         morning_key = f"{chat_id}:{today}"
         if morning_key not in morning_greeted:
@@ -945,19 +820,36 @@ async def handle_text(message: types.Message):
         return
     last_repeat[repeat_key] = t
 
-    # ── 6. Длинное сообщение ──────────────────────────────────────────────────
-    if state is None and len(text) > 200:
-        await message.reply(random.choice(LONG_MSG_REPLIES))
-        return
-
-    # ── 7. Упоминание Эльзы ───────────────────────────────────────────────────
-    if state is None and mentions_elza(text):
-        if is_offender(chat_id, user_id) and random.random() < 0.35:
-            await message.reply(random.choice(OFFENDER_REPLIES))
+    # ── 6. Длинное сообщение (только если не обращение к Эльзе) ──────────────
+    if state is None and len(text) > 200 and not mentions_elza(text):
+        is_reply_to_bot = (
+            message.reply_to_message is not None
+            and message.reply_to_message.from_user is not None
+            and message.reply_to_message.from_user.is_bot
+        )
+        if not is_reply_to_bot:
+            await message.reply(random.choice(LONG_MSG_REPLIES))
             return
-        reply = mood_reply(MOOD_ELZA_REPLIES, chat_id, ELZA_REPLIES_DEFAULT)
-        await message.reply(reply)
-        return
+
+    # ── 7. Упоминание Эльзы или ответ на её сообщение → ВСЕГДА Gemini AI ─────
+    if state is None:
+        is_private = message.chat.type == "private"
+        is_reply_to_bot = (
+            message.reply_to_message is not None
+            and message.reply_to_message.from_user is not None
+            and message.reply_to_message.from_user.is_bot
+        )
+
+        if mentions_elza(text) or is_reply_to_bot or is_private:
+            if is_offender(chat_id, user_id) and random.random() < 0.2 and not is_reply_to_bot:
+                await message.reply(random.choice(OFFENDER_REPLIES))
+                return
+            ai_reply = await ask_gemini(chat_id, user_id, text)
+            if ai_reply:
+                await message.reply(ai_reply)
+            else:
+                await message.reply("ну чего тебе 😒 я думаю, скажи ещё раз")
+            return
 
     # ── 8. Тематические триггеры ──────────────────────────────────────────────
     if state is None:
@@ -999,7 +891,7 @@ async def handle_text(message: types.Message):
             await message.reply(random.choice(SHORT_REPLIES))
             return
 
-        if is_question(text) and not mentions_elza(text):
+        if is_question(text):
             q_key = f"{chat_id}:{today}"
             if q_key not in question_replied and random.random() < 0.3:
                 question_replied[q_key] = True
@@ -1021,15 +913,11 @@ async def handle_text(message: types.Message):
                 date_idx = i
                 break
         if date_idx is None:
-            await message.answer(
-                "❌ Не нашёл дату. Формат: <b>ДД.ММ</b> или <b>ДД.ММ.ГГГГ</b>",
-                reply_markup=MAIN_KB,
-            )
+            await message.answer("❌ Не нашёл дату. Формат: <b>ДД.ММ</b> или <b>ДД.ММ.ГГГГ</b>", reply_markup=MAIN_KB)
             return
         name = " ".join(parts[:date_idx]).strip()
         date_str = parts[date_idx]
         rest = " ".join(parts[date_idx+1:]).strip()
-
         gift = ""
         note = rest
         if "подарок:" in rest.lower():
@@ -1038,7 +926,6 @@ async def handle_text(message: types.Message):
                 gift = gift_match.group(1).strip()
                 note = rest[:gift_match.start()].strip() + " " + rest[gift_match.end():].strip()
                 note = note.strip()
-
         if not name:
             await message.answer("❌ Имя не может быть пустым.", reply_markup=MAIN_KB)
             return
@@ -1051,20 +938,17 @@ async def handle_text(message: types.Message):
         except ValueError:
             await message.answer("❌ Неверная дата. Проверь день и месяц.", reply_markup=MAIN_KB)
             return
-
         cid = str(chat_id)
         if cid not in DATA:
             DATA[cid] = {}
         DATA[cid][name] = {"date": date_str, "note": note, "gift": gift}
         save_data()
-
         d, is_today = days_until(date_str)
         display = format_date_display(date_str)
         zodiac = get_zodiac(date_str)
         zodiac_str = f" {ZODIAC_EMOJI.get(zodiac, '')} {zodiac}" if zodiac else ""
         note_str = f"\n📝 Заметка: {note}" if note else ""
         gift_str = f"\n🎁 Подарок: {gift}" if gift else ""
-
         if is_today:
             await message.answer(
                 f"🎉 Сохранено и сегодня же ДР у <b>{name}</b>! 🎂{zodiac_str}{note_str}{gift_str}",
@@ -1099,10 +983,7 @@ async def handle_text(message: types.Message):
         pending.pop(chat_id, None)
         date_str = text.strip()
         if not DATE_RE.match(date_str):
-            await message.answer(
-                "❌ Неверный формат. Используй <b>ДД.ММ</b>\nПример: <code>05.03</code>",
-                reply_markup=MAIN_KB,
-            )
+            await message.answer("❌ Неверный формат. Используй <b>ДД.ММ</b>\nПример: <code>05.03</code>", reply_markup=MAIN_KB)
             return
         zodiac = get_zodiac(date_str)
         if zodiac:
@@ -1114,51 +995,30 @@ async def handle_text(message: types.Message):
         else:
             await message.answer("❌ Не удалось определить знак зодиака.", reply_markup=MAIN_KB)
 
-# ─── Универсальный хендлер медиа (фото, видео, стикеры, голосовые и т.д.) ────
+# ─── Медиа хендлеры ──────────────────────────────────────────────────────────
 
 async def log_media(message: types.Message, media_type: str, extra: str = ""):
-    """Пересылает информацию о медиа-сообщении админу."""
     try:
         user  = message.from_user
         chat  = message.chat
         now   = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-
-        chat_type = {
-            "private":    "👤 Личка",
-            "group":      "👥 Группа",
-            "supergroup": "👥 Супергруппа",
-        }.get(chat.type, chat.type)
-
+        chat_type = {"private": "👤 Личка", "group": "👥 Группа", "supergroup": "👥 Супергруппа"}.get(chat.type, chat.type)
         chat_title = chat.title or "—"
         user_name  = f"{user.first_name or ''} {user.last_name or ''}".strip() or "—"
         username   = f"@{user.username}" if user.username else "нет username"
         caption    = message.caption or ""
         cap_line   = f"\n📝 <b>Подпись:</b> {caption}" if caption else ""
-
         report = (
-            f"📨 <b>Новое сообщение</b>\n"
-            f"🕐 {now}\n"
-            f"─────────────────\n"
-            f"{chat_type}: <b>{chat_title}</b>\n"
-            f"🆔 chat_id: <code>{chat.id}</code>\n"
-            f"─────────────────\n"
-            f"👤 <b>{user_name}</b> ({username})\n"
-            f"🆔 user_id: <code>{user.id}</code>\n"
-            f"─────────────────\n"
+            f"📨 <b>Новое сообщение</b>\n🕐 {now}\n─────────────────\n"
+            f"{chat_type}: <b>{chat_title}</b>\n🆔 chat_id: <code>{chat.id}</code>\n─────────────────\n"
+            f"👤 <b>{user_name}</b> ({username})\n🆔 user_id: <code>{user.id}</code>\n─────────────────\n"
             f"{media_type}{extra}{cap_line}"
         )
         await notify_admin(report)
-
-        # Пересылаем само сообщение (чтобы видеть фото/стикер/голосовое)
         try:
-            await bot.forward_message(
-                chat_id=ADMIN_ID,
-                from_chat_id=chat.id,
-                message_id=message.message_id,
-            )
+            await bot.forward_message(chat_id=ADMIN_ID, from_chat_id=chat.id, message_id=message.message_id)
         except Exception:
-            pass  # если не удалось переслать — ничего страшного, отчёт уже отправлен
-
+            pass
     except Exception as e:
         logger.error(f"log_media error: {e}")
 
@@ -1217,13 +1077,13 @@ async def handle_animation(message: types.Message):
 # ─── Фоновые задачи ───────────────────────────────────────────────────────────
 
 async def reminder_loop():
-    congratulated:    set = set()
-    reminded:         set = set()
-    daily_said:       set = set()
-    countdown_sent:   dict = {}
-    poll_sent:        dict = {}
-    fav_announced:    set = set()
-    mood_announced:   set = set()
+    congratulated:  set  = set()
+    reminded:       set  = set()
+    daily_said:     set  = set()
+    countdown_sent: dict = {}
+    poll_sent:      dict = {}
+    fav_announced:  set  = set()
+    mood_announced: set  = set()
 
     daily_hour   = random.randint(8, 21)
     daily_minute = random.randint(0, 59)
@@ -1235,7 +1095,6 @@ async def reminder_loop():
             day_key  = now.strftime("%Y-%m-%d")
             week_key = week_str()
 
-            # ── Объявление настроения дня в 9:00 ─────────────────────────────
             if now.hour == 9 and now.minute == 0 and day_key not in mood_announced:
                 mood_announced = {day_key}
                 for chat_id in DATA.keys():
@@ -1247,7 +1106,6 @@ async def reminder_loop():
                 await asyncio.sleep(61)
                 continue
 
-            # ── Обратный отсчёт (за 7, 3, 1 день) ───────────────────────────
             if now.hour == 10 and now.minute == 0:
                 for chat_id, group in DATA.items():
                     for name, info in group.items():
@@ -1262,7 +1120,6 @@ async def reminder_loop():
                                     await bot.send_message(int(chat_id), phrase)
                                 except Exception as e:
                                     logger.error(f"Ошибка обратного отсчёта {chat_id}: {e}")
-
                         if d == 7:
                             poll_key = f"{chat_id}:{name}"
                             if poll_sent.get(poll_key) != day_key:
@@ -1274,21 +1131,14 @@ async def reminder_loop():
                                 options += ["Цветы 💐", "Деньги 💵", "Сертификат 🎫", "Сам(а) придумаю 🤷"]
                                 options = list(dict.fromkeys(options))[:10]
                                 try:
-                                    await bot.send_poll(
-                                        int(chat_id),
-                                        question=f"🎁 Что дарим {name}?",
-                                        options=options,
-                                        is_anonymous=False,
-                                    )
+                                    await bot.send_poll(int(chat_id), question=f"🎁 Что дарим {name}?", options=options, is_anonymous=False)
                                 except Exception as e:
                                     logger.error(f"Ошибка опроса {chat_id}: {e}")
 
-            # ── В 00:00 — поздравления с гифкой + пожелания от чата ──────────
             if now.hour == 0 and now.minute == 0 and day_key not in congratulated:
                 congratulated = {day_key}
                 daily_hour   = random.randint(8, 21)
                 daily_minute = random.randint(0, 59)
-                logger.info(f"Завтрашняя фраза в {daily_hour:02d}:{daily_minute:02d}")
                 for chat_id, group in DATA.items():
                     for name, info in group.items():
                         date = info.get("date") if isinstance(info, dict) else info
@@ -1297,63 +1147,44 @@ async def reminder_loop():
                             gif_url = random.choice(BIRTHDAY_GIFS)
                             cid = str(chat_id)
                             try:
-                                await bot.send_animation(
-                                    int(chat_id),
-                                    animation=gif_url,
-                                    caption=f"🎉🎂 <b>С ДНЕМ РОЖДЕНИЯ, {name}!</b> 🎂🎉\n\n{random.choice(CONGRATS)}"
-                                )
+                                await bot.send_animation(int(chat_id), animation=gif_url,
+                                    caption=f"🎉🎂 <b>С ДНЕМ РОЖДЕНИЯ, {name}!</b> 🎂🎉\n\n{random.choice(CONGRATS)}")
                             except Exception as e:
                                 logger.error(f"Ошибка поздравления {chat_id}: {e}")
                                 try:
-                                    await bot.send_message(
-                                        int(chat_id),
-                                        f"🎉🎂 <b>С ДНЕМ РОЖДЕНИЯ, {name}!</b> 🎂🎉\n\n{random.choice(CONGRATS)}"
-                                    )
+                                    await bot.send_message(int(chat_id), f"🎉🎂 <b>С ДНЕМ РОЖДЕНИЯ, {name}!</b> 🎂🎉\n\n{random.choice(CONGRATS)}")
                                 except:
                                     pass
-
                             wishes_list = WISHES.get(cid, {}).get(name, [])
                             if wishes_list:
                                 wishes_text = "\n".join(f"💌 {w}" for w in wishes_list)
                                 try:
-                                    await bot.send_message(
-                                        int(chat_id),
-                                        f"🌸 <b>Пожелания для {name} от чата:</b>\n\n{wishes_text}"
-                                    )
+                                    await bot.send_message(int(chat_id), f"🌸 <b>Пожелания для {name} от чата:</b>\n\n{wishes_text}")
                                     WISHES[cid][name] = []
                                     save_wishes()
                                 except Exception as e:
                                     logger.error(f"Ошибка пожеланий {chat_id}: {e}")
-
                             gift = info.get("gift", "") if isinstance(info, dict) else ""
                             if gift:
                                 try:
-                                    await bot.send_message(
-                                        int(chat_id),
-                                        f"🎁 Напоминаю: для <b>{name}</b> планировали подарить <b>{gift}</b>! Не забыли? 👀"
-                                    )
+                                    await bot.send_message(int(chat_id), f"🎁 Напоминаю: для <b>{name}</b> планировали подарить <b>{gift}</b>! Не забыли? 👀")
                                 except Exception as e:
                                     logger.error(f"Ошибка напоминания о подарке {chat_id}: {e}")
                 await asyncio.sleep(61)
                 continue
 
-            # ── В 01:00 — ежедневное напоминание ─────────────────────────────
             if now.hour == 1 and now.minute == 0 and day_key not in reminded:
                 reminded = {day_key}
                 for chat_id, group in DATA.items():
                     try:
                         if not group:
                             continue
-                        await bot.send_message(
-                            int(chat_id),
-                            "🌙 <b>Ежедневное напоминание</b>\n\n" + birthdays_text(group)
-                        )
+                        await bot.send_message(int(chat_id), "🌙 <b>Ежедневное напоминание</b>\n\n" + birthdays_text(group))
                     except Exception as e:
                         logger.error(f"Ошибка напоминания {chat_id}: {e}")
                 await asyncio.sleep(61)
                 continue
 
-            # ── Случайное время — ежедневная фраза ───────────────────────────
             if now.hour == daily_hour and now.minute == daily_minute and day_key not in daily_said:
                 daily_said = {day_key}
                 for chat_id in DATA.keys():
@@ -1364,19 +1195,15 @@ async def reminder_loop():
                 await asyncio.sleep(61)
                 continue
 
-            # ── Раз в неделю (воскресенье 20:00) — любимчик недели ───────────
             if now.weekday() == 6 and now.hour == 20 and now.minute == 0 and week_key not in fav_announced:
                 fav_announced = {week_key}
                 for chat_id in list(DATA.keys()):
                     uid, uname = get_weekly_fav(int(chat_id))
                     if uname:
                         try:
-                            await bot.send_message(
-                                int(chat_id),
+                            await bot.send_message(int(chat_id),
                                 f"👑 <b>Любимчик недели</b> по версии Эльзы — <b>{uname}</b>!\n"
-                                f"Самая активная в чате на этой неделе 💅✨\n"
-                                f"Аплодисменты! 👏"
-                            )
+                                f"Самая активная в чате на этой неделе 💅✨\nАплодисменты! 👏")
                         except Exception as e:
                             logger.error(f"Ошибка любимчика {chat_id}: {e}")
                     ensure_memory(int(chat_id))
