@@ -20,6 +20,15 @@ from aiogram.types import (
 from dotenv import load_dotenv
 from flask import Flask
 
+# ─── Gemini import (graceful — bot works without it) ─────────────────────────
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError as _gemini_import_err:
+    genai = None
+    GEMINI_AVAILABLE = False
+    # Will be logged properly once the logger is set up below
+
 load_dotenv()
 
 logging.basicConfig(
@@ -28,6 +37,13 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
+
+if not GEMINI_AVAILABLE:
+    logger.error(
+        "❌ google-generativeai не установлен! "
+        "Запусти: pip install google-generativeai  "
+        "Бот будет работать без Gemini (только хардкод-ответы)."
+    )
 
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
@@ -38,6 +54,71 @@ ADMIN_ID = 6114745287  # твой Telegram ID
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
+# ─── Gemini setup ─────────────────────────────────────────────────────────────
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+_gemini_model = None  # initialised in main() after logging is ready
+
+GEMINI_SYSTEM_PROMPT = (
+    "Ты — Эльза Абдрахманова, дерзкая и остроумная девушка-бот в Telegram-чате. "
+    "Ты общаешься по-русски, коротко и с характером: немного саркастична, иногда ласкова, "
+    "используешь эмодзи. Отвечай на сообщение пользователя в своём стиле — "
+    "не более 2–3 предложений. Никогда не говори что ты ИИ или языковая модель. "
+    "Ты просто Эльза 💅"
+)
+
+GEMINI_TIMEOUT = 10  # секунд — если API не ответил, используем хардкод
+
+
+def _call_gemini_sync(user_text: str, mood: str) -> str:
+    """
+    Синхронный вызов Gemini SDK — запускается в executor чтобы не блокировать event loop.
+    Возвращает строку с ответом или бросает исключение.
+    """
+    mood_hint = {
+        "злая":          "Сегодня ты в плохом настроении — отвечай резче обычного.",
+        "добрая":        "Сегодня ты в хорошем настроении — отвечай теплее обычного.",
+        "ленивая":       "Сегодня ты ленивая — отвечай коротко и без энтузиазма.",
+        "гиперактивная": "Сегодня ты гиперактивная — отвечай энергично, с восклицаниями!",
+    }.get(mood, "")
+
+    full_prompt = f"{GEMINI_SYSTEM_PROMPT} {mood_hint}\n\nСообщение: {user_text}"
+    response = _gemini_model.generate_content(full_prompt)
+    return response.text.strip()
+
+
+async def generate_gemini_response(user_text: str, mood: str) -> str | None:
+    """
+    Асинхронная обёртка над Gemini API.
+    Возвращает строку с ответом, или None если что-то пошло не так.
+    Никогда не бросает исключений — все ошибки логируются.
+    """
+    if not GEMINI_AVAILABLE:
+        logger.debug("generate_gemini_response: пропуск — библиотека не установлена")
+        return None
+    if _gemini_model is None:
+        logger.warning("generate_gemini_response: пропуск — модель не инициализирована (нет GEMINI_API_KEY?)")
+        return None
+
+    logger.debug(f"generate_gemini_response: вызов для текста={user_text!r:.80} mood={mood}")
+    loop = asyncio.get_event_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, _call_gemini_sync, user_text, mood),
+            timeout=GEMINI_TIMEOUT,
+        )
+        if not result:
+            logger.warning("generate_gemini_response: пустой ответ от Gemini")
+            return None
+        logger.info(f"generate_gemini_response: успешный ответ ({len(result)} символов)")
+        return result
+    except asyncio.TimeoutError:
+        logger.error(f"generate_gemini_response: таймаут ({GEMINI_TIMEOUT}с) — используем хардкод")
+        return None
+    except Exception as exc:
+        logger.error(f"generate_gemini_response: ошибка — {type(exc).__name__}: {exc}")
+        return None
+
 
 async def notify_admin(text: str):
     """Тихо отправляет сообщение админу, не падает при ошибке."""
@@ -950,13 +1031,30 @@ async def handle_text(message: types.Message):
         await message.reply(random.choice(LONG_MSG_REPLIES))
         return
 
-    # ── 7. Упоминание Эльзы ───────────────────────────────────────────────────
-    if state is None and mentions_elza(text):
+    # ── 7. Упоминание Эльзы или ответ на её сообщение ────────────────────────
+    bot_info_cache = getattr(bot, "_me", None)
+    is_reply_to_bot = (
+        message.reply_to_message is not None
+        and message.reply_to_message.from_user is not None
+        and bot_info_cache is not None
+        and message.reply_to_message.from_user.id == bot_info_cache.id
+    )
+
+    if state is None and (mentions_elza(text) or is_reply_to_bot):
         if is_offender(chat_id, user_id) and random.random() < 0.35:
             await message.reply(random.choice(OFFENDER_REPLIES))
             return
-        reply = mood_reply(MOOD_ELZA_REPLIES, chat_id, ELZA_REPLIES_DEFAULT)
-        await message.reply(reply)
+
+        mood = get_mood(chat_id)
+        logger.debug(f"handle_text: пробуем Gemini для user={user_id} mood={mood}")
+        gemini_reply = await generate_gemini_response(text, mood)
+
+        if gemini_reply:
+            await message.reply(gemini_reply)
+        else:
+            # Fallback: хардкод-ответы по настроению
+            reply = mood_reply(MOOD_ELZA_REPLIES, chat_id, ELZA_REPLIES_DEFAULT)
+            await message.reply(reply)
         return
 
     # ── 8. Тематические триггеры ──────────────────────────────────────────────
@@ -1402,8 +1500,38 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 async def main():
+    global _gemini_model
+
     logger.info("🚀 Эльза Абдрахманова запускается...")
+
+    # ── Инициализация Gemini ──────────────────────────────────────────────────
+    if GEMINI_AVAILABLE and GEMINI_API_KEY:
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+            _gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+            # Быстрый тест — убеждаемся что API ключ рабочий
+            loop = asyncio.get_event_loop()
+            test_resp = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: _gemini_model.generate_content("Скажи 'ок' одним словом").text.strip()
+                ),
+                timeout=15,
+            )
+            logger.info(f"✅ Gemini инициализирован и работает! Тест: {test_resp!r}")
+        except asyncio.TimeoutError:
+            logger.error("❌ Gemini: таймаут при тестовом запросе — проверь сеть/ключ. Работаем без Gemini.")
+            _gemini_model = None
+        except Exception as exc:
+            logger.error(f"❌ Gemini: ошибка инициализации — {type(exc).__name__}: {exc}. Работаем без Gemini.")
+            _gemini_model = None
+    elif not GEMINI_API_KEY:
+        logger.warning("⚠️  GEMINI_API_KEY не задан — Gemini отключён, используются хардкод-ответы.")
+    else:
+        logger.warning("⚠️  google-generativeai не установлен — Gemini отключён.")
+
     bot_info = await bot.get_me()
+    bot._me = bot_info  # кэшируем для is_reply_to_bot проверки в handle_text
     logger.info(f"✅ Бот запущен: @{bot_info.username}")
     asyncio.create_task(reminder_loop())
     await dp.start_polling(bot, drop_pending_updates=True)
