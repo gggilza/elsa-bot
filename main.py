@@ -19,6 +19,7 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 from flask import Flask
+import google.generativeai as genai
 
 load_dotenv()
 
@@ -33,6 +34,30 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     logger.error("BOT_TOKEN не найден!")
     sys.exit(1)
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+gemini_model = None
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        ELZA_SYSTEM_PROMPT = (
+            "Ты — Эльза Абдрахманова, дерзкая и уверенная в себе девушка-бот в Telegram. "
+            "Ты саркастичная, остроумная, немного высокомерная, но в глубине души добрая. "
+            "Говоришь только по-русски, активно используешь эмодзи. "
+            "Отвечаешь коротко и по делу — максимум 2–3 предложения. "
+            "Никогда не признаёшь что ты ИИ или языковая модель — ты просто Эльза. "
+            "Не используешь markdown-разметку вроде ** или __. "
+            "Если тебя спрашивают о чём-то конкретном — отвечаешь по существу, но в своём стиле."
+        )
+        gemini_model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=ELZA_SYSTEM_PROMPT,
+        )
+        logger.info("✅ Gemini AI инициализирован")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации Gemini: {e}")
+else:
+    logger.warning("⚠️ GEMINI_API_KEY не найден, Gemini отключён")
 
 ADMIN_ID = 6114745287  # твой Telegram ID
 
@@ -499,6 +524,24 @@ def mentions_elza(text: str) -> bool:
     t = text.lower()
     return "эльза" in t or "elza" in t
 
+async def generate_gemini_response(text: str, chat_id: int) -> str:
+    """Генерирует ответ через Gemini AI с учётом личности Эльзы.
+    При ошибке возвращает случайную фразу из стандартного пула."""
+    if gemini_model is None:
+        return mood_reply(MOOD_ELZA_REPLIES, chat_id, ELZA_REPLIES_DEFAULT)
+    try:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: gemini_model.generate_content(text),
+        )
+        result = response.text.strip()
+        if result:
+            return result
+    except Exception as e:
+        logger.error(f"Ошибка Gemini API: {e}")
+    return mood_reply(MOOD_ELZA_REPLIES, chat_id, ELZA_REPLIES_DEFAULT)
+
 def is_emoji_only(text: str) -> bool:
     cleaned = text.replace(" ", "").replace("\n", "")
     if not cleaned:
@@ -950,12 +993,18 @@ async def handle_text(message: types.Message):
         await message.reply(random.choice(LONG_MSG_REPLIES))
         return
 
-    # ── 7. Упоминание Эльзы ───────────────────────────────────────────────────
-    if state is None and mentions_elza(text):
+    # ── 7. Упоминание Эльзы или ответ на её сообщение ────────────────────────
+    bot_info = await bot.get_me()
+    is_reply_to_elza = (
+        message.reply_to_message is not None
+        and message.reply_to_message.from_user is not None
+        and message.reply_to_message.from_user.id == bot_info.id
+    )
+    if state is None and (mentions_elza(text) or is_reply_to_elza):
         if is_offender(chat_id, user_id) and random.random() < 0.35:
             await message.reply(random.choice(OFFENDER_REPLIES))
             return
-        reply = mood_reply(MOOD_ELZA_REPLIES, chat_id, ELZA_REPLIES_DEFAULT)
+        reply = await generate_gemini_response(text, chat_id)
         await message.reply(reply)
         return
 
