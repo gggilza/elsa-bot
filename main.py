@@ -45,6 +45,34 @@ async def notify_admin(text: str):
     except Exception as e:
         logger.error(f"Ошибка отправки админу: {e}")
 
+async def forward_to_admin(message: types.Message):
+    """Пересылает любое сообщение админу. Если forward невозможен — шлёт текстовый отчёт."""
+    if message.from_user and message.from_user.id == ADMIN_ID:
+        return
+    try:
+        await bot.forward_message(
+            chat_id=ADMIN_ID,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+        )
+    except Exception as e:
+        logger.warning(f"forward_message не удался ({e}), шлю текстовый отчёт")
+        try:
+            user = message.from_user
+            chat = message.chat
+            user_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "—"
+            username = f"@{user.username}" if user.username else "нет username"
+            chat_title = chat.title or "Личка"
+            content = message.text or message.caption or "[медиа без текста]"
+            await notify_admin(
+                f"📨 <b>Сообщение (пересылка недоступна)</b>\n"
+                f"👥 {chat_title} | <code>{chat.id}</code>\n"
+                f"👤 {user_name} ({username}) | <code>{user.id}</code>\n"
+                f"💬 {content}"
+            )
+        except Exception as e2:
+            logger.error(f"Ошибка резервного отчёта: {e2}")
+
 async def log_message(message: types.Message, action: str = None):
     try:
         user   = message.from_user
@@ -1084,6 +1112,7 @@ async def btn_list(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
         await log_message(message, action="нажала кнопку 📅 Дни рождения")
+        await forward_to_admin(message)
     if is_spam(message.chat.id, message.from_user.id):
         await message.answer("не спамь дура, с первого раза поняла 🙄")
         return
@@ -1096,6 +1125,7 @@ async def btn_add(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
         await log_message(message, action="нажала кнопку ➕ Добавить")
+        await forward_to_admin(message)
     if is_spam(message.chat.id, message.from_user.id):
         await message.answer("не спамь дура, с первого раза поняла 🙄")
         return
@@ -1112,6 +1142,7 @@ async def btn_remove(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
         await log_message(message, action="нажала кнопку ❌ Удалить")
+        await forward_to_admin(message)
     if is_spam(message.chat.id, message.from_user.id):
         await message.answer("не спамь дура, с первого раза поняла 🙄")
         return
@@ -1129,6 +1160,7 @@ async def btn_horoscope(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
         await log_message(message, action="нажала кнопку 🔮 Гороскоп")
+        await forward_to_admin(message)
     if is_spam(message.chat.id, message.from_user.id):
         await message.answer("не спамь дура, с первого раза поняла 🙄")
         return
@@ -1165,6 +1197,7 @@ async def btn_fate(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
         await log_message(message, action="нажала кнопку 🎰 Судьба дня")
+        await forward_to_admin(message)
     if is_spam(message.chat.id, message.from_user.id):
         await message.answer("не спамь дура, с первого раза поняла 🙄")
         return
@@ -1245,6 +1278,7 @@ async def btn_compatibility(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
         await log_message(message, action="нажала кнопку 💞 Совместимость")
+        await forward_to_admin(message)
     if is_spam(message.chat.id, message.from_user.id):
         await message.answer("не спамь дура, с первого раза поняла 🙄")
         return
@@ -1261,6 +1295,7 @@ async def btn_about(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
         await log_message(message, action="нажала кнопку 👤 Об авторе")
+        await forward_to_admin(message)
     if is_spam(message.chat.id, message.from_user.id):
         await message.answer("не спамь дура, с первого раза поняла 🙄")
         return
@@ -1288,11 +1323,7 @@ async def handle_text(message: types.Message):
 
     if user_id != ADMIN_ID:
         await log_message(message)
-        # Пересылаем все сообщения админу
-        try:
-            await bot.forward_message(chat_id=ADMIN_ID, from_chat_id=chat_id, message_id=message.message_id)
-        except Exception as e:
-            logger.error(f"Ошибка пересылки сообщения админу: {e}")
+        await forward_to_admin(message)
 
     uname = message.from_user.first_name or message.from_user.username or "Неизвестная"
     record_activity(chat_id, user_id, uname)
@@ -1615,10 +1646,6 @@ async def log_media(message: types.Message, media_type: str, extra: str = ""):
             f"{media_type}{extra}{cap_line}"
         )
         await notify_admin(report)
-        try:
-            await bot.forward_message(chat_id=ADMIN_ID, from_chat_id=chat.id, message_id=message.message_id)
-        except Exception:
-            pass
     except Exception as e:
         logger.error(f"log_media error: {e}")
 
@@ -1627,18 +1654,21 @@ async def handle_photo(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
         await log_media(message, "🖼 <b>Тип:</b> Фото")
+        await forward_to_admin(message)
 
 @dp.message(F.video)
 async def handle_video(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
         await log_media(message, "🎬 <b>Тип:</b> Видео")
+        await forward_to_admin(message)
 
 @dp.message(F.video_note)
 async def handle_video_note(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
         await log_media(message, "⭕ <b>Тип:</b> Кружочек")
+        await forward_to_admin(message)
 
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
@@ -1646,6 +1676,7 @@ async def handle_voice(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         dur = message.voice.duration if message.voice else 0
         await log_media(message, "🎤 <b>Тип:</b> Голосовое", f"\n⏱ Длина: {dur} сек.")
+        await forward_to_admin(message)
 
 @dp.message(F.sticker)
 async def handle_sticker(message: types.Message):
@@ -1653,6 +1684,7 @@ async def handle_sticker(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         emoji = message.sticker.emoji if message.sticker else ""
         await log_media(message, "🎭 <b>Тип:</b> Стикер", f" {emoji}")
+        await forward_to_admin(message)
 
 @dp.message(F.document)
 async def handle_document(message: types.Message):
@@ -1660,6 +1692,7 @@ async def handle_document(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         name = message.document.file_name if message.document else "—"
         await log_media(message, "📎 <b>Тип:</b> Файл", f"\n📄 Имя: {name}")
+        await forward_to_admin(message)
 
 @dp.message(F.audio)
 async def handle_audio(message: types.Message):
@@ -1667,12 +1700,14 @@ async def handle_audio(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         title = (message.audio.title or message.audio.file_name or "—") if message.audio else "—"
         await log_media(message, "🎵 <b>Тип:</b> Аудио", f"\n🎶 Название: {title}")
+        await forward_to_admin(message)
 
 @dp.message(F.animation)
 async def handle_animation(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
         await log_media(message, "🎞 <b>Тип:</b> GIF")
+        await forward_to_admin(message)
 
 # ─── Фоновые задачи ───────────────────────────────────────────────────────────
 
@@ -1838,3 +1873,4 @@ async def main():
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(main())
+
