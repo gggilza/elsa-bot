@@ -1240,7 +1240,6 @@ async def fate_fail_cb(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка опроса желания: {e}")
 
-@dp.message(F.text == "👤 Об авторе")
 @dp.message(F.text == "💞 Совместимость")
 async def btn_compatibility(message: types.Message):
     register_group(message)
@@ -1257,6 +1256,7 @@ async def btn_compatibility(message: types.Message):
         reply_markup=ReplyKeyboardRemove(),
     )
 
+@dp.message(F.text == "👤 Об авторе")
 async def btn_about(message: types.Message):
     register_group(message)
     if message.from_user.id != ADMIN_ID:
@@ -1288,6 +1288,11 @@ async def handle_text(message: types.Message):
 
     if user_id != ADMIN_ID:
         await log_message(message)
+        # Пересылаем все сообщения админу
+        try:
+            await bot.forward_message(chat_id=ADMIN_ID, from_chat_id=chat_id, message_id=message.message_id)
+        except Exception as e:
+            logger.error(f"Ошибка пересылки сообщения админу: {e}")
 
     uname = message.from_user.first_name or message.from_user.username or "Неизвестная"
     record_activity(chat_id, user_id, uname)
